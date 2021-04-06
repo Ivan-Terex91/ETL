@@ -1,0 +1,96 @@
+version: '3.7'
+
+services:
+
+  movies-admin:
+    build:
+      context: ./DjangoMovieAdmin
+      dockerfile: Dockerfile
+    command: >
+      sh -c "
+      python manage.py migrate
+      && gunicorn config.wsgi:application --bind 0.0.0.0:8000"
+    volumes:
+      - static_volume:/home/app/DjangoMovieAdmin/config/staticfiles
+    env_file:
+      - ./DjangoMovieAdmin/.env.django
+    depends_on:
+      - db
+    restart: always
+
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfiledb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    env_file:
+      - .env.db
+    ports:
+      - 5432:5432
+    restart: always  
+  
+  redis:
+    image: redis
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+      - redis_data:/var/lib/redis/data/
+    ports:
+      - 6379:6379
+    depends_on:
+      - movies-admin
+    restart: always
+  
+      
+  es:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.7.0
+    volumes:
+      - elasticsearch_data:/var/lib/elasticsearch/data/
+    env_file:
+      - .env.es
+    ports:
+      - 9200:9200
+    restart: always  
+    
+
+  sqlite-to-postgres:
+    build: 
+      context: ./sqlite_to_postgres
+      dockerfile: Dockerfile
+    command: > 
+      sh -c "sleep 3 && python ./main.py"
+    env_file:
+      - ./sqlite_to_postgres/.env.sqlite_pg
+    depends_on:
+      - db
+      - movies-admin
+
+      
+  postgres-to-elastic:
+    build: 
+      context: ./postgres_to_es
+      dockerfile: Dockerfile
+    command: > 
+      sh -c "sleep 10 && chmod +x ./index.sh && ./index.sh && python ./logic/main.py"
+    env_file:
+      - ./postgres_to_es/.env.pg_es_red
+    depends_on:
+      - sqlite-to-postgres
+  
+  nginx:
+    build: ./nginx
+    volumes:
+      - static_volume:/home/app/DjangoMovieAdmin/config/staticfiles
+    ports:
+      - 80:80
+    depends_on:
+      - movies-admin
+    restart: always
+      
+volumes:
+  postgres_data:
+  elasticsearch_data:
+  static_volume:
+  redis_data:
+
