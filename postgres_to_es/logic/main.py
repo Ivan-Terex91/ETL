@@ -1,21 +1,24 @@
 import time
 
-from elt_pipelines import ETLPipelines
+from logic.elt_pipelines import ETLPipelines
+from logic.extract_data_from_postgres import PostgresLoader
+from logic.load_to_elastic import ESLoader
+from logic.transform_data import transform_movies_coroutine
+from settings import dsn_pg, dsn_es
 
 if __name__ == '__main__':
-    movies_elt = ETLPipelines(etl_process_name='movies', table_name='movies_movie', table_alias='movie')
-    genres_etl = ETLPipelines(etl_process_name='genres', table_name='movies_genre', table_alias='genre',
-                              main_table_name='movies_movie', main_table_alias='movie',
-                              related_table_name='movies_movie_genres',
-                              related_table_alias='movie_genres', relation='genre')
-    persons_etl = ETLPipelines(etl_process_name='persons', table_name='movies_person', table_alias='person',
-                               main_table_name='movies_movie', main_table_alias='movie',
-                               related_table_name='movies_movieperson',
-                               related_table_alias='movieperson', relation='person')
+
+    movies_elt = ETLPipelines(etl_process_name='movies', extract=PostgresLoader(dsn_pg, 'movies'),
+                              transform=transform_movies_coroutine,
+                              load=ESLoader(dsn_es))
+    genres_etl = ETLPipelines(etl_process_name='genres', extract=PostgresLoader(dsn_pg, 'genres'),
+                              transform=transform_movies_coroutine,
+                              load=ESLoader(dsn_es))
+    persons_etl = ETLPipelines(etl_process_name='persons', extract=PostgresLoader(dsn_pg, 'persons'),
+                               transform=transform_movies_coroutine,
+                               load=ESLoader(dsn_es))
     while True:
-        genres_etl()
-        time.sleep(10)
-        movies_elt()
-        time.sleep(10)
-        persons_etl()
+        genres_etl.start_elt()
+        movies_elt.start_elt()
+        persons_etl.start_elt()
         time.sleep(10)
