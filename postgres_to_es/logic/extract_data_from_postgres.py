@@ -1,4 +1,5 @@
 import logging.config
+
 import psycopg2
 import redis
 from typing import Coroutine
@@ -16,7 +17,7 @@ class PostgresLoader:
     """Класс загрузки данных из postgresql.
     Класс аккамулирует в себе методы для загрузки данных из БД"""
 
-    def __init__(self, dsn: dict, elt_process_name: str):
+    def __init__(self, dsn, elt_process_name: str):
         self.dsn_pg = dsn
         self.redis = redis.Redis
         self.state = RedisStorage(self.redis)
@@ -25,7 +26,8 @@ class PostgresLoader:
         self.config_tables = self.tables_names_for_extract
 
     @backoff(exception_class=psycopg2.Error)
-    def main_table_function(self, datetime_update: str, limit: int, next_coroutine: Coroutine):
+    def main_table_function(self, datetime_update: str,
+                            limit: int, next_coroutine: Coroutine):
         """
          Метод для загрузки обновлённых данных из таблицы, в зависимости от ETL процесса и имени таблицы.
          :param datetime_update: последнее время обновления записей в таблице
@@ -33,31 +35,40 @@ class PostgresLoader:
          :param next_coroutine: корутина в которую будет передваться результат запроса
          :return: None
         """
+
         while True:
             storage_key = ':'.join((self.etl_process_name, self.config_tables.get('table_alias'), self.name_key))
             curr_offset = int(self.state.retrieve_state(storage_key))
-            connection = psycopg2.connect(**self.dsn_pg)
-            cursor = connection.cursor()
+            with psycopg2.connect(**self.dsn_pg) as connection:
+                cursor = connection.cursor()
 
-            query = query_formatter(table_name=self.config_tables.get('table_name'),
-                                    table_alias=self.config_tables.get('table_alias'))
-            cursor.execute(query, (datetime_update, curr_offset, limit))
-            result = cursor.fetchall()
+                query = query_formatter(table_name=self.config_tables.get('table_name'),
+                                        table_alias=self.config_tables.get('table_alias'))
+                cursor.execute(query, (datetime_update, curr_offset, limit))
+                result = cursor.fetchall()
+                if result:
+                    params_for_next_coroutine = []
+                    try:
+                        for param in result:
+                            params_for_next_coroutine.append(param[0])
+                        next_coroutine.send(params_for_next_coroutine)
 
-            if result:
-                params_for_next_coroutine = []
-                try:
-                    for param in result:
-                        params_for_next_coroutine.append(param[0])
-                    next_coroutine.send(params_for_next_coroutine)
-                except GeneratorExit:
-                    next_coroutine.close()
-                self.state.save_state(storage_key, curr_offset + len(params_for_next_coroutine))
-            else:
-                logger.info(msg=f'Extracted all updated records from the table {self.config_tables.get("table_name")}')
-                logger.info(msg=f'quantity of updated records {int(self.state.retrieve_state(storage_key))}')
-                self.state.save_state(storage_key, 0)
-                return
+                    except GeneratorExit:
+                        next_coroutine.close()
+                    except StopIteration:
+                        self.state.save_state(':'.join((self.etl_process_name, 'datetime_update')), datetime_update)
+                        next_coroutine.close()
+                        logger.warning(
+                            msg=f'Extracted not all updated records from the table {self.config_tables.get("table_name")}')
+                        return
+
+                    self.state.save_state(storage_key, curr_offset + len(params_for_next_coroutine))
+                else:
+                    logger.info(
+                        msg=f'Extracted all updated records from the table {self.config_tables.get("table_name")}')
+                    logger.info(msg=f'quantity of updated records {int(self.state.retrieve_state(storage_key))}')
+                    self.state.save_state(storage_key, 0)
+                    return
 
     @backoff(exception_class=psycopg2.Error)
     @init_coroutine
@@ -75,30 +86,32 @@ class PostgresLoader:
             while True:
                 params_from_prev_coroutine = yield
                 curr_offset = int(self.state.retrieve_state(storage_key))
-                connection = psycopg2.connect(**self.dsn_pg)
-                cursor = connection.cursor()
+                with psycopg2.connect(**self.dsn_pg) as connection:
+                    cursor = connection.cursor()
 
-                related_query = query_rel_formatter(main_table_name=self.config_tables.get('main_table_name'),
-                                                    main_table_alias=self.config_tables.get('main_table_alias'),
-                                                    related_table_name=self.config_tables.get('related_table_name'),
-                                                    related_table_alias=self.config_tables.get('related_table_alias'),
-                                                    relation=self.config_tables.get('relation'))
+                    related_query = query_rel_formatter(main_table_name=self.config_tables.get('main_table_name'),
+                                                        main_table_alias=self.config_tables.get('main_table_alias'),
+                                                        related_table_name=self.config_tables.get('related_table_name'),
+                                                        related_table_alias=self.config_tables.get(
+                                                            'related_table_alias'),
+                                                        relation=self.config_tables.get('relation'))
 
-                if params_from_prev_coroutine:
-                    params_for_next_coroutine = []
-                    while True:
-                        cursor.execute(related_query, (tuple(params_from_prev_coroutine), curr_offset, limit))
-                        result = cursor.fetchall()
-                        if not result:
-                            break
+                    if params_from_prev_coroutine:
+                        params_for_next_coroutine = []
+                        while True:
+                            cursor.execute(related_query, (tuple(params_from_prev_coroutine), curr_offset, limit))
+                            result = cursor.fetchall()
 
-                        for param in result:
-                            params_for_next_coroutine.append(param[0])
+                            if not result:
+                                break
 
-                        curr_offset = curr_offset + len(result)
+                            for param in result:
+                                params_for_next_coroutine.append(param[0])
 
-                    next_coroutine.send(params_for_next_coroutine)
-                    self.state.save_state(storage_key, curr_offset + len(params_for_next_coroutine))
+                            curr_offset = curr_offset + len(result)
+                            next_coroutine.send(params_for_next_coroutine)
+                            self.state.save_state(storage_key, curr_offset + len(params_for_next_coroutine))
+                    self.state.save_state(storage_key, 0)
         except GeneratorExit:
             self.state.save_state(storage_key, 0)
             next_coroutine.close()
@@ -116,18 +129,18 @@ class PostgresLoader:
         try:
             while True:
                 movie_list = yield
-                connection = psycopg2.connect(**self.dsn_pg)
-                cursor = connection.cursor()
-                full_data_movie_list = []
-                full_data_movies_query = query_full_data_movies()
+                with psycopg2.connect(**self.dsn_pg) as connection:
+                    cursor = connection.cursor()
+                    full_data_movie_list = []
+                    full_data_movies_query = query_full_data_movies()
 
-                if movie_list:
-                    cursor.execute(full_data_movies_query, (tuple(movie_list),))
+                    if movie_list:
+                        cursor.execute(full_data_movies_query, (tuple(movie_list),))
 
-                    for full_data_movie in cursor.fetchall():
-                        full_data_movie_list.append(full_data_movie)
+                        for full_data_movie in cursor.fetchall():
+                            full_data_movie_list.append(full_data_movie)
 
-                next_coroutine.send(full_data_movie_list)
+                    next_coroutine.send(full_data_movie_list)
         except GeneratorExit:
             next_coroutine.close()
 
