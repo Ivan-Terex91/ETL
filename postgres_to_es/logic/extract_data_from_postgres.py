@@ -53,14 +53,8 @@ class PostgresLoader:
                             params_for_next_coroutine.append(param[0])
                         next_coroutine.send(params_for_next_coroutine)
 
-                    except GeneratorExit:
-                        next_coroutine.close()
                     except StopIteration:
-                        self.state.save_state(':'.join((self.etl_process_name, 'datetime_update')), datetime_update)
                         next_coroutine.close()
-                        logger.warning(
-                            msg=f'Extracted not all updated records from the table {self.config_tables.get("table_name")}')
-                        return
 
                     self.state.save_state(storage_key, curr_offset + len(params_for_next_coroutine))
                 else:
